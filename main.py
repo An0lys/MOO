@@ -63,10 +63,12 @@ def grasp_iteration(cpu_costs, ram_costs, storage_costs, num_machines, num_insta
             best_cost = cost_neighbor
             best_balance = balance_neighbor
     
+
+    print(f"Cost={best_cost}, Balance={best_balance}")
     return best_cost, best_balance
 
 # Implémentation de l'algorithme Dragonfly
-def dragonfly_optimization(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iterations=100):
+def dragonfly_optimization(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iterations=10):
     population_size = 30
     step_size = 0.1
     inertia_weight = 0.9
@@ -92,18 +94,22 @@ def dragonfly_optimization(cpu_costs, ram_costs, storage_costs, num_machines, nu
             
             velocities[i] = inertia_weight * velocities[i] + attraction_weight * (best_solution - population[i])
             population[i] = np.clip(population[i] + step_size * velocities[i], 0, num_machines - 1).astype(int)
-        
+    
+    print(f"Cost={best_cost}, Balance={best_balance}")
     return best_cost, best_balance
 
 # Exécuter GRASP et Dragonfly
 def evaluate_algorithms(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iterations=100):
+    print("Running GRASP...")
     grasp_solutions = Parallel(n_jobs=-1)(delayed(grasp_iteration)(cpu_costs, ram_costs, storage_costs, num_machines, num_instances) for _ in range(iterations))
+
+    print("Running Dragonfly...")
     dragonfly_solutions = Parallel(n_jobs=-1)(delayed(dragonfly_optimization)(cpu_costs, ram_costs, storage_costs, num_machines, num_instances) for _ in range(iterations))
     
     return np.array(grasp_solutions), np.array(dragonfly_solutions)
 
 # Comparaison des performances
-grasp_solutions, dragonfly_solutions = evaluate_algorithms(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iterations=100)
+grasp_solutions, dragonfly_solutions = evaluate_algorithms(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iterations=10)
 
 def pareto_frontier(solutions):
     solutions = sorted(solutions, key=lambda x: x[0])  # Trier par coût croissant
