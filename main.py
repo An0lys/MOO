@@ -5,23 +5,23 @@ import matplotlib.pyplot as plt
 import random
 from joblib import Parallel, delayed
 
-# Load datasets
+# Charger les fichiers CSV
 machine_events_path = "data/uc_machine_events.csv"
 instance_events_path = "data/uc_instance_events.csv"
 
 machines_df = pd.read_csv(machine_events_path)
 instances_df = pd.read_csv(instance_events_path)
 
-# Extract resources from machine events
+# Extraction des ressources
+
 def parse_properties(properties_str):
     try:
-        return eval(properties_str)  # Convert string to dictionary
+        return eval(properties_str)  # Convertir string en dictionnaire
     except:
         return {}
 
 machines_df['PROPERTIES'] = machines_df['PROPERTIES'].apply(parse_properties)
 
-# Extract relevant resource attributes
 def extract_resources(row):
     props = row['PROPERTIES']
     return {
@@ -32,24 +32,25 @@ def extract_resources(row):
 
 machines_df['RESOURCES'] = machines_df.apply(extract_resources, axis=1)
 
-# Construct Fog Computing Graph
+# Création du graphe de Fog Computing
 G = nx.Graph()
 for _, row in machines_df.iterrows():
     G.add_node(row['HOST_NAME (PHYSICAL)'], **row['RESOURCES'])
 
-# Define Multi-Objective Optimization using GRASP with Adaptive Iterations and Simulated Annealing
+# Fonction d'équilibrage de charge
 def compute_load_balance(solution, num_machines):
     machine_usage = np.array([np.count_nonzero(solution == m) for m in range(num_machines)])
-    return np.std(machine_usage)  # Standard deviation as a balance measure
+    return np.std(machine_usage)
 
-def grasp_iteration(cpu_costs, ram_costs, num_machines, num_instances):
+# Implémentation GRASP + Recuit Simulé amélioré
+def grasp_iteration(cpu_costs, ram_costs, num_machines, num_instances, simulated_annealing=False):
     solution = np.random.choice(num_machines, num_instances)
     best_solution = solution.copy()
     best_cost = np.sum(cpu_costs[solution]) + np.sum(ram_costs[solution])
     best_balance = compute_load_balance(solution, num_machines)
     
-    temperature = 1.0
-    cooling_rate = 0.95
+    temperature = 0.5 if simulated_annealing else 0
+    cooling_rate = 0.99 if simulated_annealing else 1
     
     for _ in range(10):
         neighbor = solution.copy()
@@ -59,8 +60,8 @@ def grasp_iteration(cpu_costs, ram_costs, num_machines, num_instances):
         cost_neighbor = np.sum(cpu_costs[neighbor]) + np.sum(ram_costs[neighbor])
         balance_neighbor = compute_load_balance(neighbor, num_machines)
         
-        if cost_neighbor < best_cost or np.exp((best_cost - cost_neighbor) / temperature) > random.random():
-            solution = neighbor
+        if cost_neighbor < best_cost or (simulated_annealing and np.exp((best_cost - cost_neighbor) / (temperature + 1e-5)) > random.uniform(0.5, 1)):
+            best_solution = neighbor.copy()
             best_cost = cost_neighbor
             best_balance = balance_neighbor
         
@@ -68,41 +69,41 @@ def grasp_iteration(cpu_costs, ram_costs, num_machines, num_instances):
     
     return best_cost, best_balance
 
-def grasp_optimization(machines_df, instances_df, iterations=300):
+# Exécuter GRASP avec et sans Recuit Simulé
+def evaluate_algorithms(machines_df, instances_df, iterations=100):
     num_machines = len(machines_df)
     num_instances = len(instances_df)
-    
-    if num_machines == 0 or num_instances == 0:
-        print("Error: No machines or instances available for optimization.")
-        return []
     
     cpu_costs = np.array([m['RESOURCES']['cpu'] for _, m in machines_df.iterrows()], dtype=float)
     ram_costs = np.array([m['RESOURCES']['ram'] for _, m in machines_df.iterrows()], dtype=float)
     
-    solutions = Parallel(n_jobs=-1)(delayed(grasp_iteration)(cpu_costs, ram_costs, num_machines, num_instances) for _ in range(iterations))
+    grasp_solutions = Parallel(n_jobs=-1)(delayed(grasp_iteration)(cpu_costs, ram_costs, num_machines, num_instances, False) for _ in range(iterations))
+    grasp_sa_solutions = Parallel(n_jobs=-1)(delayed(grasp_iteration)(cpu_costs, ram_costs, num_machines, num_instances, True) for _ in range(iterations))
     
-    # Filter out dominated points
-    solutions = sorted(solutions, key=lambda x: x[0])
-    pareto_front = []
+    return np.array(grasp_solutions), np.array(grasp_sa_solutions)
+
+# Comparaison des performances
+grasp_solutions, grasp_sa_solutions = evaluate_algorithms(machines_df, instances_df, iterations=300)
+
+# Filtrer les solutions dominées
+def pareto_frontier(solutions):
+    solutions = sorted(solutions, key=lambda x: x[0])  # Trier par coût croissant
+    pareto = []
     for sol in solutions:
-        if not any(other[0] <= sol[0] and other[1] <= sol[1] for other in pareto_front):
-            pareto_front.append(sol)
-    
-    return pareto_front
+        if not any(other[1] <= sol[1] for other in pareto):
+            pareto.append(sol)
+    return np.array(pareto)
 
-# Run GRASP-based Optimization with More Points
-pareto_solutions = grasp_optimization(machines_df, instances_df, iterations=300)
+grasp_pareto = pareto_frontier(grasp_solutions)
+grasp_sa_pareto = pareto_frontier(grasp_sa_solutions)
 
-# Plot Pareto Frontier
-if pareto_solutions:
-    pareto_solutions = np.array(pareto_solutions)
-    plt.figure(figsize=(8, 6))
-    plt.scatter(pareto_solutions[:, 0], pareto_solutions[:, 1], color='red', label='Pareto Optimal Points')
-    plt.xlabel('Total Cost (CPU + RAM)')
-    plt.ylabel('Load Balance (Lower is Better)')
-    plt.title('Pareto Frontier: Cost vs. Load Balancing')
-    plt.legend()
-    plt.grid()
-    plt.show()
-else:
-    print("No feasible Pareto solutions found.")
+# Visualisation des Pareto Frontiers
+plt.figure(figsize=(8, 6))
+plt.scatter(grasp_pareto[:, 0], grasp_pareto[:, 1], color='blue', label='GRASP')
+plt.scatter(grasp_sa_pareto[:, 0], grasp_sa_pareto[:, 1], color='red', label='GRASP + SA')
+plt.xlabel('Total Cost (CPU + RAM)')
+plt.ylabel('Load Balance (Lower is Better)')
+plt.title('Comparison: GRASP vs GRASP + Simulated Annealing')
+plt.legend()
+plt.grid()
+plt.show()
