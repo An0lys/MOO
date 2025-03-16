@@ -44,11 +44,28 @@ def compute_load_balance(solution, num_machines):
 
 # Filtrer les solutions dominées
 def pareto_frontier(solutions):
-    solutions = sorted(solutions, key=lambda x: x[0])  # Trier par coût croissant
+   
+    # 1) Conversion en liste de tableaux NumPy si besoin (pour uniformiser le type et faciliter zip).
+    solutions = [np.array(s, dtype=float) for s in solutions]
+
+    # 2) On trie par la première dimension (ex: coût).
+    solutions.sort(key=lambda x: x[0])
+    
     pareto = []
+    
+    # 3) Pour chaque solution, on vérifie si elle est dominée ou non par un membre de la frontière.
     for sol in solutions:
-        if not any(other[1] <= sol[1] for other in pareto):
+        # Si aucune solution dans 'pareto' ne domine 'sol', alors 'sol' est Pareto-optimal.
+        # 'o' domine 'sol' si o[i] <= sol[i] pour toutes les dimensions i.
+        # On cherche donc s'il existe un 'o' qui vérifie cette condition.
+        is_dominated = any(
+            all(o_i <= s_i for o_i, s_i in zip(o, sol))
+            for o in pareto
+        )
+        if not is_dominated:
             pareto.append(sol)
+
+    # 4) Conversion finale en array.
     return np.array(pareto)
 
 # Implémentation de GRASP
@@ -75,61 +92,104 @@ def grasp(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iter
     return history, np.array(solutions)
 
 # Implémentation de l'algorithme Dragonfly
-def dragonfly(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iterations=10):
+def dragonfly(cpu_costs, ram_costs, storage_costs, num_machines, num_instances, iterations):
     population_size = 30
-    step_size = 0.1
+    
     inertia_weight = 0.9
     attraction_weight = 0.5
     separation_weight = 0.2
     alignment_weight = 0.2
     cohesion_weight = 0.2
     distraction_weight = 0.1
+    distance_threshold = None
+    balance_weight=1.0
     
-    # Initialize dragonflies (positions) and velocity vectors
-    population = np.random.randint(0, num_machines, (population_size, num_instances))
-    velocities = np.zeros((population_size, num_instances))
-    
+    # Pré-calcul des coûts
+    machine_costs = cpu_costs + ram_costs + storage_costs
+
+    # Initialisation
+    population = np.random.randint(0, num_machines, size=(population_size, num_instances))
+    velocities = np.zeros_like(population, dtype=float)
+
+    # Pour mémoriser les évolutions
     history = []
     solutions = []
+
+    best_cost = np.inf
     
-    for iteration in range(iterations):
-        fitness = []
+    best_balance = 0
+
+    if distance_threshold is None:
+        distance_threshold = num_instances / 4.0
+
+    for iteration in range(int(iterations / population_size)):
+        # Calcul vectorisé
+        total_costs = np.array([np.sum(machine_costs[ind]) for ind in population])
+        balances = np.array([compute_load_balance(ind, num_machines) for ind in population])
+        fitness = total_costs - balance_weight *  balances
+
+        best_idx = np.argmin(fitness)
+        worst_idx = np.argmax(fitness)
+
+        food_source = population[best_idx].copy()
+        enemy_source = population[worst_idx].copy()
+
+        diff = population[:, None, :] - population[None, :, :]
+        distances = np.sqrt(np.sum(diff * diff, axis=-1))
+        neighbors_mask = (distances < distance_threshold)
+
         for i in range(population_size):
-            solution = np.clip(np.round(population[i]), 0, num_machines - 1).astype(int)
-            total_cost = np.sum(cpu_costs[solution]) + np.sum(ram_costs[solution]) + np.sum(storage_costs[solution])
-            balance = compute_load_balance(solution, num_machines)
-            fitness.append((total_cost, balance))
-        
-        best_idx = np.argmin([f[0] for f in fitness])  # Select best dragonfly based on cost
-        worst_idx = np.argmax([f[0] for f in fitness])  # Select worst dragonfly
-        food_source = population[best_idx]  # Best solution as food source
-        enemy_source = population[worst_idx]  # Worst solution as distraction
-        
-        for i in range(population_size):
-            neighbors = [j for j in range(population_size) if np.linalg.norm(population[j] - population[i]) < num_instances / 4]
-            
-            if len(neighbors) >= 1:
-                separation = np.mean([population[i] - population[j] for j in neighbors], axis=0)
-                alignment = np.mean([velocities[j] for j in neighbors], axis=0)
-                cohesion = np.mean([population[j] for j in neighbors], axis=0) - population[i]
-                attraction = food_source - population[i]
-                distraction = enemy_source + population[i]
-                
-                velocities[i] = (inertia_weight * velocities[i] +
-                                 separation_weight * separation +
-                                 alignment_weight * alignment +
-                                 cohesion_weight * cohesion +
-                                 attraction_weight * attraction -
-                                 distraction_weight * distraction)
-                population[i] = np.clip(population[i] + step_size * velocities[i], 0, num_machines - 1).astype(int)
+            neighbors_idx = np.where(neighbors_mask[i])[0]
+            n_count = len(neighbors_idx)
+
+            if n_count > 1:
+                separation = np.sum(population[i] - population[neighbors_idx], axis=0) / n_count
+                alignment = np.mean(velocities[neighbors_idx], axis=0)
+                mean_position = np.mean(population[neighbors_idx], axis=0)
+                cohesion = mean_position - population[i]
             else:
-                population[i] = np.clip(population[i] + np.random.uniform(-1, 1, num_instances), 0, num_machines - 1).astype(int)
-        
-        solutions.append((fitness[best_idx][0], fitness[best_idx][1]))
-        history.append((iteration, fitness[best_idx][0], fitness[best_idx][1]))
-        print(f"Dragonfly Iteration {iteration}: Cost={fitness[best_idx][0]}, Balance={fitness[best_idx][1]}")
-    
+                separation = np.random.uniform(-1, 1, num_instances)
+                alignment = np.zeros(num_instances)
+                cohesion = np.zeros(num_instances)
+
+            attraction = food_source - population[i]
+            distraction = enemy_source - population[i]
+
+            velocities[i] = (
+                inertia_weight * velocities[i]
+                + separation_weight * separation
+                + alignment_weight * alignment
+                + cohesion_weight * cohesion
+                + attraction_weight * attraction
+                - distraction_weight * distraction
+            )
+
+            population[i] = np.round(population[i] + velocities[i]).astype(int)
+            np.clip(population[i], 0, num_machines - 1, out=population[i])
+
+        # Meilleur individu global de cette itération
+        iteration_best_cost = total_costs[best_idx]
+        iteration_best_balance = balances[best_idx]
+
+        # Mise à jour si on a un mieux global
+        if iteration_best_balance > best_balance:
+            
+            
+            best_balance = iteration_best_balance
+            if iteration_best_cost < best_cost:
+                best_cost = iteration_best_cost
+                 
+
+        # On mémorise dans l'historique
+        history.append((iteration, iteration_best_cost, iteration_best_balance))
+        solutions.append((best_cost, best_balance))
+
+        print(f"Iteration {iteration} | Best Cost: {best_cost} | Best balance: {best_balance}" )
+
+
+    # On retourne, comme GRASP, l'historique et toutes les paires (coût, balance)
     return history, np.array(solutions)
+
 
 # Exécuter GRASP et Dragonfly
 def evaluate_algorithms(iterations):
@@ -138,7 +198,7 @@ def evaluate_algorithms(iterations):
     return grasp_results, dragonfly_results
 
 # Comparaison des performances
-grasp_results, dragonfly_results = evaluate_algorithms(iterations=30)
+grasp_results, dragonfly_results = evaluate_algorithms(iterations=900)
 grasp_pareto = pareto_frontier(grasp_results[1])
 dragonfly_pareto = pareto_frontier(dragonfly_results[1])
 
@@ -149,7 +209,7 @@ plt.scatter(dragonfly_results[1][:, 0], dragonfly_results[1][:, 1], color='light
 plt.scatter(grasp_pareto[:, 0], grasp_pareto[:, 1], color='blue', label='GRASP Pareto')
 plt.scatter(dragonfly_pareto[:, 0], dragonfly_pareto[:, 1], color='green', label='Dragonfly Pareto')
 plt.xlabel('Total Cost (CPU + RAM + Storage)')
-plt.ylabel('Load Balance (Lower is Better)')
+plt.ylabel('Load Balance (Higher is Better)')
 plt.title('Comparison: GRASP vs Dragonfly')
 plt.legend()
 plt.grid()
